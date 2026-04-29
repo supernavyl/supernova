@@ -111,24 +111,44 @@ luminosity computation.
 
 ```
 index.html          — canvas, HUD DOM, CSS (OKLCH palette, JetBrains Mono)
-main.js             — WebGL2 context, shader loading, render loop, scrubber wiring
+main.js             — WebGL2 context, render loop, scrubber wiring
 state.js            — time→T_eff, time→radius, phase labels, formatters
 blackbody.js        — Tanner Helland polynomial (JS side — used for HUD colour tint)
 shaders/
-  fullscreen.vert.glsl  — fullscreen triangle (gl_VertexID trick, no VBO)
-  raymarch.frag.glsl    — Beer + HG + fBm + self-shadow raymarcher, Tanner Helland GLSL
+  fullscreen.vert.glsl  — canonical reference (read by editors / glslangValidator)
+  fullscreen.vert.js    — same source, ESM-exported string (loaded by main.js)
+  raymarch.frag.glsl    — canonical reference
+  raymarch.frag.js      — same source, ESM-exported string (loaded by main.js)
 ```
+
+Shader sources are inlined as ESM string exports rather than fetched from
+disk. The await between `getContext('webgl2')` and `compileShader` is when
+Brave/Chromium can preempt the freshly-created context with a spurious
+`CONTEXT_LOST_WEBGL`, killing the first compile. Inlining removes the gap.
+The `.glsl` files remain the canonical reference for editor tooling and
+`glslangValidator` — **edit both when changing a shader**.
 
 ## Running
 
 ```bash
 cd /path/to/supernova
+npm run dev          # python3 -m http.server 8000
+# or, if you prefer to invoke directly:
 python3 -m http.server 8000
 # open http://localhost:8000/
 ```
 
 Requires a browser with WebGL2: Chrome 56+, Firefox 51+, Safari 15+, Edge 79+.
-No npm, no build step, no external JS libraries.
+`package.json` exists only for `npm run dev` and `npm test` convenience —
+zero runtime dependencies, no bundler, no build step.
+
+## Tests
+
+```bash
+npm test                    # runs both checks
+node test/blackbody-fidelity.js    # 26-anchor regression sweep
+node test/anti-cliche.js           # first-paint must read blue-white
+```
 
 ## Controls
 

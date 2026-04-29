@@ -333,6 +333,9 @@
                 text-transform:  uppercase;
             }
 
+            /* `hidden` attribute must override `display: flex` above */
+            #loader[hidden] { display: none; }
+
             /* ── WebGL error message ──────────────────────────────────── */
             #webgl-error {
                 position:        absolute;

@@ -1,4 +1,11 @@
-#version 300 es
+// Inlined GLSL ES 3.00 source for the volumetric raymarch fragment shader.
+// Mirror of shaders/raymarch.frag.glsl. Inlining as a JS string avoids the
+// async fetch await in main.js init — that gap is when Brave/Chromium can
+// preempt the freshly-created WebGL2 context and lose it before compile.
+//
+// If you edit one, edit the other. The .glsl file remains the canonical
+// reference for static analysis (glslangValidator) and editor tooling.
+export default /* glsl */ `#version 300 es
 precision highp float;
 
 in vec2 v_uv;
@@ -284,3 +291,4 @@ void main() {
 
     fragColor = vec4(finalColor, 1.0);
 }
+`;
