@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <title>SN-VOL-RT — Calibration Plate</title>
-    <meta name="description" content="Physically-grounded WebGL2 volumetric supernova simulation. Beer's law extinction, Henyey-Greenstein scattering, Tanner Helland blackbody color.">
+    <meta name="description" content="Physically-grounded WebGL2 3D particle simulation of a core-collapse supernova. 120k thermally-emissive ejecta particles, Tanner Helland blackbody, Sedov-Taylor shell scaling, HDR Reinhard tonemap, orbital camera.">
 
     <!-- JetBrains Mono for monospace readouts (display + numerics) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -800,15 +800,15 @@
             <div id="top-rail-strip">
                 <span class="plate-tag">SN-VOL-RT</span>
                 <span class="plate-sep">│</span>
-                <span>REV ν1.0</span>
+                <span>REV ν2.0</span>
                 <span class="plate-sep">│</span>
-                <span>MODE: RAYMARCH</span>
+                <span>MODE: GPU-PCL-3D</span>
                 <span class="plate-sep">│</span>
-                <span>N=64+6 [steps]</span>
+                <span>N=120k [particles]</span>
                 <span class="plate-sep">│</span>
-                <span>g=0.600 [—] (model: HG)</span>
+                <span>HDR-RGBA16F (model: Reinhard)</span>
                 <span class="plate-sep">│</span>
-                <span>σ_BL=1.000 [—]</span>
+                <span>WP=6.0 [—]</span>
                 <span class="plate-warn" aria-label="Time compression disclaimer">
                     <strong>TIME COMPRESSED</strong>&nbsp;~13 ORDERS [s] &mdash; NOT REAL-TIME
                 </span>
@@ -921,15 +921,15 @@
                 <div class="ledger-row">
                     <span class="ledger-label">Instrument [const.]</span>
                     <div class="ledger-spec" id="spec-block-detail">
-                        <span>g = 0.600</span><span class="sep">│</span>
-                        <span>σ_abs = 1.0 [—]</span><span class="sep">│</span>
-                        <span>N_p = 64 [steps]</span><span class="sep">│</span>
-                        <span>N_l = 6 [steps]</span><span class="sep">│</span>
-                        <span>fBm 5 / 2.0 / 0.5</span><span class="sep">│</span>
-                        <span>T_W = 3.5 (Reinhard)</span>
+                        <span>N = 120 000 [particles]</span><span class="sep">│</span>
+                        <span>r_shell ∝ t<sup>0.40</sup> (model: Sedov-Taylor)</span><span class="sep">│</span>
+                        <span>RT clumping: fBm 4 / 2.0 / 0.5</span><span class="sep">│</span>
+                        <span>Buffer: RGBA16F (HDR)</span><span class="sep">│</span>
+                        <span>WP = 6.0 [—] (model: Reinhard)</span><span class="sep">│</span>
+                        <span>FOV<sub>y</sub> = 45° [arc]</span>
                     </div>
                     <div class="ledger-spec" id="spec-block-summary">
-                        <span>g=0.600</span><span class="sep">│</span><span>N=64+6</span>
+                        <span>N=120k</span><span class="sep">│</span><span>WP=6.0</span><span class="sep">│</span><span>RGBA16F</span>
                     </div>
                 </div>
 
