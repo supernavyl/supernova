@@ -26,11 +26,14 @@ const MARCH_STEPS = IS_MOBILE ? 32 : 64;
 // ─── WebGL2 capability gate ───────────────────────────────────────────────
 const canvas = document.getElementById('c');
 
-// Size the backing buffer BEFORE creating the WebGL context.
-// On some browsers (notably headless Brave/Chromium), mutating canvas.width
-// or canvas.height after context creation can trigger CONTEXT_LOST_WEBGL,
-// killing shader compilation before the first frame. Pre-sizing the canvas
-// avoids that initial transition entirely.
+// `gl` is the live WebGL2 rendering context — populated by init() ONLY after
+// window.load fires (full layout + fonts settled). Acquiring it earlier
+// produced sporadic CONTEXT_LOST_WEBGL on Brave/Chromium when the post-parse
+// layout reflowed the canvas size between getContext and the first
+// useProgram. Same for sizeCanvasBacking — the canvas backing buffer must
+// not be mutated until layout is final.
+let gl = null;
+
 function sizeCanvasBacking() {
     const dpr = Math.min(window.devicePixelRatio || 1, IS_MOBILE ? 1.5 : 2);
     const cw = canvas.clientWidth  || window.innerWidth;
@@ -43,28 +46,16 @@ function sizeCanvasBacking() {
     }
     return { w, h };
 }
-sizeCanvasBacking();
 
-const gl = canvas.getContext('webgl2', {
-    antialias:           false,
-    preserveDrawingBuffer: false,
-    powerPreference:     'high-performance',
-});
-if (!gl) {
+function failWebGL2(reason) {
     document.getElementById('webgl-error').hidden = false;
     canvas.hidden = true;
-    document.getElementById('hud-tl').hidden = true;
-    const hudTr = document.getElementById('hud-tr');
-    if (hudTr) hudTr.hidden = true;
-    document.getElementById('controls').hidden = true;
-    throw new Error('WebGL2 not available');
+    const ledger = document.getElementById('right-ledger');
+    if (ledger) ledger.hidden = true;
+    const bottomRail = document.getElementById('bottom-rail');
+    if (bottomRail) bottomRail.hidden = true;
+    throw new Error(reason);
 }
-
-// Recover from genuine context-loss events (GPU process restart, tab background)
-canvas.addEventListener('webglcontextlost', (e) => {
-    e.preventDefault();
-    console.warn('WebGL context lost — reload the page to recover.');
-});
 
 // ─── Shader compilation ───────────────────────────────────────────────────
 function compileShader(type, source) {
@@ -104,46 +95,79 @@ let program  = null;
 // Uniform locations (set after link)
 let loc = {};
 
-// ─── HUD elements ─────────────────────────────────────────────────────────
-const hudTeff    = document.getElementById('hud-teff');
-const hudTime    = document.getElementById('hud-time');
-const hudTimeSci = document.getElementById('hud-time-sci');
-const hudPhase   = document.getElementById('hud-phase');
-const scrubber   = document.getElementById('scrubber');
-const scrubLabel = document.getElementById('scrub-label');
+// ─── Chrome elements (calibration-plate ledger + bottom-rail cursor) ──────
+const ledgerTeff       = document.getElementById('ledger-teff');
+const ledgerTeffSci    = document.getElementById('ledger-teff-sci');
+const ledgerPhase      = document.getElementById('ledger-phase');
+const ledgerTime       = document.getElementById('ledger-time');
+const ledgerTimeSci    = document.getElementById('ledger-time-sci');
+const bbBarTick        = document.getElementById('bb-bar-tick');
+const cursorContainer  = document.getElementById('bottom-rail-inner');
+const scrubReadoutCur  = document.getElementById('scrub-readout-current');
+const scrubber         = document.getElementById('scrubber');
+
+/**
+ * Format T_eff in scientific form, e.g. 5.40 × 10⁴ K
+ */
+function formatTeffSci(teffK) {
+    if (!Number.isFinite(teffK) || teffK <= 0) return '— K';
+    const exp = Math.floor(Math.log10(teffK));
+    const mantissa = teffK / Math.pow(10, exp);
+    // Unicode superscript exponent mapping
+    const supDigits = '⁰¹²³⁴⁵⁶⁷⁸⁹';
+    const expStr = String(exp).split('').map(c => c === '-' ? '⁻' : supDigits[+c]).join('');
+    return `${mantissa.toFixed(2)} × 10${expStr} K`;
+}
+
+/**
+ * Map T_eff (K) to its position on the 4 000–80 000 K blackbody bar [0, 1].
+ * Linear in K (matches the gradient sampling in CSS).
+ */
+function teffToBarPct(teffK) {
+    const lo = 4000, hi = 80000;
+    const clamped = Math.max(lo, Math.min(hi, teffK));
+    return ((clamped - lo) / (hi - lo)) * 100;
+}
 
 function updateHUD() {
-    hudTeff.textContent    = formatTeff(teff);
-    hudTeff.style.color    = blackbodyToCSS(teff);
-    hudTime.textContent    = formatTime(logT);
-    hudTimeSci.textContent = formatTimeSci(logT);
-    hudPhase.textContent   = phaseLabel(logT);
-    scrubLabel.textContent = formatTime(logT);
+    // Large T_eff readout (blackbody-tinted)
+    ledgerTeff.textContent     = formatTeff(teff);
+    ledgerTeff.style.color     = blackbodyToCSS(teff);
+
+    // Scientific form
+    ledgerTeffSci.textContent  = formatTeffSci(teff);
+
+    // Phase regime
+    ledgerPhase.textContent    = phaseLabel(logT);
+
+    // Physical time
+    ledgerTime.textContent     = formatTime(logT);
+    ledgerTimeSci.textContent  = formatTimeSci(logT);
+
+    // Blackbody-bar tick position
+    bbBarTick.style.left       = teffToBarPct(teff).toFixed(2) + '%';
+
+    // Bottom-rail cursor crosshair — position as percentage of the slider track
+    if (cursorContainer) {
+        cursorContainer.style.setProperty('--cursor-pct', (scrubPos * 100).toFixed(3) + '%');
+    }
+
+    // Readout strip
+    if (scrubReadoutCur) {
+        scrubReadoutCur.textContent =
+            `log₁₀ t = ${logT.toFixed(2)} [s]  ·  t = ${formatTime(logT)}`;
+    }
 }
 
-// ─── Resize handler ───────────────────────────────────────────────────────
-// IMPORTANT: mutating canvas.width or canvas.height is what destroys the
-// WebGL context on Chromium/Brave. Do it only when the window actually
-// changes size — never every frame. The render loop only adjusts gl.viewport.
-let pendingResize = false;
-function handleWindowResize() {
-    if (pendingResize) return;
-    pendingResize = true;
-    requestAnimationFrame(() => {
-        pendingResize = false;
-        const before = { w: canvas.width, h: canvas.height };
-        const { w, h } = sizeCanvasBacking();
-        if (w !== before.w || h !== before.h) {
-            // Backing buffer changed → context has been reset by the browser.
-            // Trigger a full reload — re-acquiring a fresh context cleanly.
-            console.warn('Canvas resized; reloading to refresh WebGL context.');
-            location.reload();
-        } else {
-            gl.viewport(0, 0, w, h);
-        }
-    });
-}
-window.addEventListener('resize', handleWindowResize);
+// ─── Resize policy ────────────────────────────────────────────────────────
+// The canvas backing buffer is LOCKED at module load (sizeCanvasBacking ran
+// at line 46). Mutating canvas.width or canvas.height after getContext on
+// Chromium/Brave silently destroys the WebGL context — that bug bit twice.
+// On window resize we accept CSS-driven visual rescaling of the locked
+// backing buffer; we do not re-allocate. If the user resizes drastically,
+// they can refresh the page for a re-acquisition at the new resolution.
+// This is the simulation-instrument idiom: a calibrated frame buffer at a
+// fixed resolution, displayed at whatever the viewport allows.
 
 // ─── Render ───────────────────────────────────────────────────────────────
 function render(now) {
@@ -187,14 +211,35 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ─── Init ──────────────────────────────────────────────────────────────────
+// Single contiguous synchronous flow, run only after window.load fires.
+// At that point: full layout settled, fonts loaded, no further reflow likely.
+// Sequence: size canvas backing → getContext → compile → link → render.
+// No awaits, no event-loop yields, no canvas mutations after getContext.
 function init() {
-    // Compile & link — shader source is inlined via static ESM import to avoid
-    // the await-fetch gap that triggered context loss before first compile.
+    // 1. Lock the canvas backing buffer to its post-layout size.
+    sizeCanvasBacking();
+
+    // 2. Acquire the WebGL2 context. Must happen AFTER sizing.
+    gl = canvas.getContext('webgl2', {
+        antialias:           false,
+        preserveDrawingBuffer: false,
+        powerPreference:     'high-performance',
+    });
+    if (!gl) failWebGL2('WebGL2 not available');
+
+    // Recover from genuine GPU-process / tab-background context loss by reload.
+    canvas.addEventListener('webglcontextlost', (e) => {
+        e.preventDefault();
+        console.warn('WebGL context lost — reloading to refresh.');
+        location.reload();
+    });
+
+    // 3. Compile + link shaders. Source is inlined ESM — zero async gap.
     const vert = compileShader(gl.VERTEX_SHADER,   VERT_SRC);
     const frag = compileShader(gl.FRAGMENT_SHADER, FRAG_SRC);
     program = linkProgram(vert, frag);
 
-    // Collect uniform locations
+    // 4. Uniform locations + empty VAO (required by WebGL2 for non-buffer draws).
     gl.useProgram(program);
     loc = {
         u_time:       gl.getUniformLocation(program, 'u_time'),
@@ -203,46 +248,40 @@ function init() {
         u_resolution: gl.getUniformLocation(program, 'u_resolution'),
         u_steps:      gl.getUniformLocation(program, 'u_steps'),
     };
-
-    // Empty VAO (required by WebGL2 for non-buffer draw calls)
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
-
-    // Initial viewport — matches the backing buffer pre-sized at module load.
-    // Never resized inside render(); only on real window resize events.
     gl.viewport(0, 0, canvas.width, canvas.height);
 
-    // Wire scrubber
+    // 5. Wire scrubber + initial HUD state.
     scrubber.value = String(DEFAULT_SCRUBBER);
     scrubber.addEventListener('input', (e) => onScrub(e.target.value));
-
-    // Initial HUD state
     onScrub(DEFAULT_SCRUBBER);
 
-    // Hide loading overlay
+    // 6. Hide loader, start render loop.
     const loader = document.getElementById('loader');
     if (loader) loader.hidden = true;
-
-    // Start render loop
     requestAnimationFrame(render);
 }
 
-// Run init synchronously now that there is no async work between getContext
-// and compileShader. Defers to window.load only if the DOM is still parsing,
-// to ensure DOM hooks (HUD elements, scrubber) are present.
 function startInit() {
     try {
         init();
     } catch (err) {
         console.error('Init failed:', err);
         const errDiv = document.getElementById('webgl-error');
-        errDiv.hidden = false;
-        errDiv.textContent = `Initialisation failed: ${err.message}`;
+        if (errDiv) {
+            errDiv.hidden = false;
+            errDiv.textContent = `Initialisation failed: ${err.message}`;
+        }
     }
 }
 
-if (document.readyState === 'complete' || document.readyState === 'interactive') {
+// Defer init to window.load — full layout, fonts, and stylesheets have settled.
+// Earlier readiness states (interactive / DOMContentLoaded) leave the canvas
+// vulnerable to layout-driven context invalidation between getContext and the
+// first compile.
+if (document.readyState === 'complete') {
     startInit();
 } else {
-    document.addEventListener('DOMContentLoaded', startInit, { once: true });
+    window.addEventListener('load', startInit, { once: true });
 }

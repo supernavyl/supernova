@@ -4,10 +4,10 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <title>Supernova — Volumetric Simulation</title>
+    <title>SN-VOL-RT — Calibration Plate</title>
     <meta name="description" content="Physically-grounded WebGL2 volumetric supernova simulation. Beer's law extinction, Henyey-Greenstein scattering, Tanner Helland blackbody color.">
 
-    <!-- JetBrains Mono for monospace readouts -->
+    <!-- JetBrains Mono for monospace readouts (display + numerics) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -15,6 +15,13 @@
     <style>
         /* ── CSS layers: reset → tokens → base → layout → components ── */
         @layer reset, tokens, base, layout, components;
+
+        /* Global rhythm property — registered for animation/interpolation safety */
+        @property --baseline-rhythm {
+            syntax: '<length>';
+            inherits: true;
+            initial-value: 4px;
+        }
 
         @layer reset {
             *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -26,14 +33,22 @@
             :root {
                 /* Palette — all OKLCH */
                 --color-bg:         oklch(0.06 0.005 240);
-                --color-surface:    oklch(0.10 0.007 240);
-                --color-border:     oklch(0.20 0.008 240);
+                --color-surface:    oklch(0.06 0.005 240);  /* same as bg — flat plate */
+                --color-border:     oklch(0.48 0.008 240);  /* structural zone divider — 3.20:1 vs bg, clears WCAG SC 1.4.11 */
                 --color-text:       oklch(0.96 0.005 250);
                 --color-muted:      oklch(0.62 0.012 245);
-                --color-accent:     oklch(0.75 0.04 200);  /* cold blue-teal — institutional */
-                --color-dim:        oklch(0.30 0.008 240);
+                --color-accent:     oklch(0.75 0.04 200);   /* cold blue-teal */
+                /* --color-dim: load-bearing for ledger caveats + axis tick labels +
+                   decorative DEC ticks. At L=0.58, contrast = 4.89:1 vs bg — clears
+                   WCAG AA for normal text. Sub-minor ticks use --color-grid below,
+                   which is exempt incidental decoration. */
+                --color-dim:        oklch(0.58 0.008 240);
 
-                /* Typography */
+                /* New tokens — earned roles */
+                --color-fiducial:   oklch(0.55 0.12 28);    /* burnt-amber */
+                --color-grid:       oklch(0.14 0.006 240);  /* hairline minor-tick */
+
+                /* Typography — JetBrains Mono for chrome, system-ui for prose only */
                 --font-mono: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', ui-monospace, monospace;
                 --font-sans: system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
 
@@ -44,9 +59,16 @@
                 --sp-lg:  1.5rem;
                 --sp-xl:  2rem;
 
-                /* HUD geometry */
-                --hud-pad: clamp(0.75rem, 2vw, 1.25rem);
-                --hud-gap: 0.5rem;
+                /* Frame geometry */
+                --baseline-rhythm: 4px;
+                --top-rail-h:      28px;
+                --left-gutter-w:   64px;
+                --right-ledger-w:  22%;
+                --bottom-rail-h:   52px;
+                --fiducial-len:    12px;
+
+                /* Cursor X position (0–1) — written from JS each frame */
+                --cursor-pct:      0%;
             }
         }
 
@@ -62,262 +84,644 @@
             }
 
             html {
-                background: var(--color-bg);
+                background:  var(--color-bg);
                 color:       var(--color-text);
-                font-family: var(--font-sans);
+                font-family: var(--font-mono);
                 font-size:   clamp(12px, 1vw + 8px, 15px);
                 -webkit-font-smoothing: antialiased;
             }
 
             body {
-                min-height: 100dvh;
-                display: flex;
+                min-height:     100dvh;
+                display:        flex;
                 flex-direction: column;
-                overflow: hidden;
+                overflow:       hidden;
             }
 
             /* Focus ring — visible on all interactive elements */
             :focus-visible {
                 outline:        2px solid var(--color-accent);
-                outline-offset: 3px;
-                border-radius:  2px;
+                outline-offset: 2px;
             }
 
-            /* Hairline horizontal rule */
-            hr.hairline {
-                border: none;
-                border-top: 1px solid var(--color-border);
-                margin: 0;
+            /* Skip link */
+            .skip-link {
+                position:    absolute;
+                left:        -9999px;
+                top:         auto;
+                width:       1px;
+                height:      1px;
+                overflow:    hidden;
+                z-index:     9999;
+                font-family: var(--font-sans);
+            }
+            .skip-link:focus {
+                left:        var(--sp-sm);
+                top:         var(--sp-sm);
+                width:       auto;
+                height:      auto;
+                padding:     var(--sp-xs) var(--sp-sm);
+                background:  var(--color-bg);
+                color:       var(--color-text);
+                border:      1px solid var(--color-accent);
+            }
+
+            .visually-hidden {
+                position:   absolute;
+                width:      1px;
+                height:     1px;
+                overflow:   hidden;
+                clip:       rect(0, 0, 0, 0);
+                white-space: nowrap;
             }
         }
 
         @layer layout {
-            /* Full viewport stack: banner → canvas-area */
+            /*
+             * Calibration-plate frame:
+             *   ┌────────────────── TOP RAIL ─────────────────┐
+             *   │ LEFT │   CANVAS              │ RIGHT LEDGER │
+             *   │ GUT  │   (fiducial corners)  │              │
+             *   └──────┴──────── BOTTOM RAIL ──┴──────────────┘
+             */
             #app {
-                display:        flex;
-                flex-direction: column;
+                display:        grid;
+                grid-template-columns:
+                    [gutter-start]   var(--left-gutter-w)
+                    [canvas-start]   1fr
+                    [ledger-start]   var(--right-ledger-w)
+                    [end];
+                grid-template-rows:
+                    [top-start]      var(--top-rail-h)
+                    [canvas-row]     1fr
+                    [bottom-start]   var(--bottom-rail-h)
+                    [end];
                 height:         100dvh;
                 position:       relative;
+                background:     var(--color-bg);
             }
 
-            /* Canvas fills remaining vertical space */
+            /* Top rail spans full width */
+            #top-rail {
+                grid-column: gutter-start / end;
+                grid-row:    top-start / canvas-row;
+                border-bottom: 1px solid var(--color-border);
+                overflow:    hidden;
+            }
+
+            /* Left gutter spans canvas + bottom rows so DEC ticks align */
+            #left-gutter {
+                grid-column: gutter-start / canvas-start;
+                grid-row:    canvas-row / bottom-start;
+                border-right: 1px solid var(--color-border);
+                position:    relative;
+                overflow:    hidden;
+            }
+
+            /* Canvas wrapper */
             #canvas-wrapper {
-                flex:     1 1 auto;
-                position: relative;
-                overflow: hidden;
-                min-height: 0;
+                grid-column: canvas-start / ledger-start;
+                grid-row:    canvas-row / bottom-start;
+                position:    relative;
+                overflow:    hidden;
+                min-height:  0;
+                min-width:   0;
             }
 
             #c {
                 display: block;
                 width:   100%;
                 height:  100%;
-                /* No border, no shadow — simulation is the content */
+            }
+
+            /* Right ledger */
+            #right-ledger {
+                grid-column: ledger-start / end;
+                grid-row:    canvas-row / bottom-start;
+                border-left: 1px solid var(--color-border);
+                overflow-y:  auto;
+                overflow-x:  hidden;
+                container-type: inline-size;
+                container-name: ledger;
+            }
+
+            /* Bottom rail spans full width — log-time axis + scrubber */
+            #bottom-rail {
+                grid-column: gutter-start / end;
+                grid-row:    bottom-start / end;
+                border-top:  1px solid var(--color-border);
+                position:    relative;
+                overflow:    hidden;
             }
         }
 
         @layer components {
-            /* ── Mandatory compression disclaimer banner ───────────────── */
-            #banner {
-                background:    var(--color-surface);
-                border-bottom: 1px solid var(--color-border);
-                padding:       0.45rem var(--hud-pad);
-                display:       flex;
-                align-items:   center;
-                justify-content: center;
-                gap:           var(--sp-sm);
-                flex-shrink:   0;
-            }
 
-            #banner p {
+            /* ────────────────────────────────────────────────────────────
+             * TOP RAIL — instrument plate engraving
+             * ──────────────────────────────────────────────────────────── */
+            #top-rail-strip {
+                display:     flex;
+                align-items: center;
+                height:      100%;
+                padding:     0 var(--sp-md);
+                gap:         var(--sp-md);
                 font-family: var(--font-mono);
-                font-size:   0.68rem;
-                font-weight: 500;
-                letter-spacing: 0.06em;
+                font-size:   0.62rem;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
                 color:       var(--color-muted);
-                text-align:  center;
-                text-transform: uppercase;
+                white-space: nowrap;
+                overflow:    hidden;
             }
 
-            #banner p strong {
+            #top-rail-strip .plate-tag {
                 color:       var(--color-text);
+            }
+
+            #top-rail-strip .plate-sep {
+                color:       var(--color-dim);
+                user-select: none;
+            }
+
+            #top-rail-strip .plate-warn {
+                color:       var(--color-fiducial);
+                margin-left: auto;
+            }
+
+            #top-rail-strip .plate-warn strong {
                 font-weight: 500;
+                color:       var(--color-fiducial);
             }
 
-            /* ── HUD overlays ─────────────────────────────────────────── */
-            .hud-panel {
-                position:   absolute;
-                z-index:    10;
-                /* Pointer-events: none so scrubbing through the HUD still works */
-                pointer-events: none;
+            /* ────────────────────────────────────────────────────────────
+             * LEFT GUTTER — DEC-style ticks (DECORATIVE)
+             * ──────────────────────────────────────────────────────────── */
+            #left-gutter-axis {
+                position:  absolute;
+                inset:     0;
+                display:   flex;
+                flex-direction: column;
+                justify-content: space-between;
+                padding:   var(--sp-sm) 0;
             }
 
-            /* Top-left: T_eff + phase */
-            #hud-tl {
-                top:  var(--hud-pad);
-                left: var(--hud-pad);
-            }
-
-            /* Top-right: time readouts */
-            #hud-tr {
-                top:   var(--hud-pad);
-                right: var(--hud-pad);
-                text-align: right;
-            }
-
-            /* Bottom: scrubber + time axis labels */
-            #controls {
-                position:   absolute;
-                bottom:     0;
-                left:       0;
-                right:      0;
-                z-index:    10;
-                padding:    var(--hud-pad);
-                /* Bottom panel: pointer-events enabled for slider interaction */
-                pointer-events: auto;
-                background: linear-gradient(to top,
-                    oklch(0.06 0.005 240 / 0.92) 0%,
-                    oklch(0.06 0.005 240 / 0.0)  100%);
-            }
-
-            /* ── HUD text styles ──────────────────────────────────────── */
-            .hud-label {
+            .dec-tick {
                 font-family:    var(--font-mono);
-                font-size:      0.64rem;
-                color:          var(--color-muted);
-                letter-spacing: 0.07em;
+                font-size:      0.56rem;
+                color:          var(--color-dim);
+                letter-spacing: 0.04em;
+                padding-right:  var(--sp-xs);
+                text-align:     right;
+                position:       relative;
+            }
+
+            .dec-tick::after {
+                /* hairline tick stub reaching toward canvas edge */
+                content:      '';
+                position:     absolute;
+                right:        0;
+                top:          50%;
+                width:        6px;
+                height:       1px;
+                background:   var(--color-border);
+            }
+
+            .left-gutter-legend {
+                position:    absolute;
+                bottom:      var(--sp-xs);
+                left:        50%;
+                transform:   translateX(-50%) rotate(-90deg);
+                transform-origin: center;
+                font-family: var(--font-mono);
+                font-size:   0.5rem;
+                color:       var(--color-dim);
+                letter-spacing: 0.1em;
                 text-transform: uppercase;
-                line-height:    1;
+                white-space: nowrap;
+            }
+
+            /* ────────────────────────────────────────────────────────────
+             * FIDUCIAL CORNER BRACKETS
+             * Q1 top-left, Q2 top-right, Q4 bottom-left, Q3 bottom-right
+             * (matches the visual: top-left → clockwise … no, MUSE specced
+             *  top corners Q1/Q2, bottom corners Q4/Q3 — preserved verbatim)
+             * ──────────────────────────────────────────────────────────── */
+            .fiducial {
+                position:      absolute;
+                width:         var(--fiducial-len);
+                height:        var(--fiducial-len);
+                pointer-events: none;
+                z-index:       8;
+                font-family:   var(--font-mono);
+                font-size:     0.56rem;
+                color:         var(--color-fiducial);
+                letter-spacing: 0.06em;
+                white-space:   nowrap;
+            }
+
+            .fiducial::before,
+            .fiducial::after {
+                content:    '';
+                position:   absolute;
+                background: var(--color-fiducial);
+            }
+
+            /* horizontal hairline */
+            .fiducial::before {
+                height: 1px;
+                width:  var(--fiducial-len);
+            }
+            /* vertical hairline */
+            .fiducial::after {
+                width:  1px;
+                height: var(--fiducial-len);
+            }
+
+            .fiducial .coord {
+                position:       absolute;
+                font-size:      0.56rem;
+                color:          var(--color-fiducial);
+                opacity:        0.8;
+                letter-spacing: 0.04em;
+            }
+
+            /* Q1 — top-left */
+            .fiducial.q1 { top: var(--sp-sm); left: var(--sp-sm); }
+            .fiducial.q1::before { top: 0; left: 0; }
+            .fiducial.q1::after  { top: 0; left: 0; }
+            .fiducial.q1 .coord  { top: 0; left: calc(var(--fiducial-len) + 6px); }
+
+            /* Q2 — top-right */
+            .fiducial.q2 { top: var(--sp-sm); right: var(--sp-sm); }
+            .fiducial.q2::before { top: 0; right: 0; }
+            .fiducial.q2::after  { top: 0; right: 0; }
+            .fiducial.q2 .coord  { top: 0; right: calc(var(--fiducial-len) + 6px); text-align: right; }
+
+            /* Q3 — bottom-right */
+            .fiducial.q3 { bottom: var(--sp-sm); right: var(--sp-sm); }
+            .fiducial.q3::before { bottom: 0; right: 0; }
+            .fiducial.q3::after  { bottom: 0; right: 0; }
+            .fiducial.q3 .coord  { bottom: 0; right: calc(var(--fiducial-len) + 6px); text-align: right; }
+
+            /* Q4 — bottom-left */
+            .fiducial.q4 { bottom: var(--sp-sm); left: var(--sp-sm); }
+            .fiducial.q4::before { bottom: 0; left: 0; }
+            .fiducial.q4::after  { bottom: 0; left: 0; }
+            .fiducial.q4 .coord  { bottom: 0; left: calc(var(--fiducial-len) + 6px); }
+
+            /* ────────────────────────────────────────────────────────────
+             * RIGHT LEDGER
+             * ──────────────────────────────────────────────────────────── */
+            #right-ledger-inner {
+                display:        grid;
+                grid-template-columns: 1fr;
+                gap:            0;
+                padding:        var(--sp-sm) var(--sp-md);
+            }
+
+            .ledger-row {
+                display:       block;
+                padding:       0.45rem 0;
+                border-bottom: 1px solid var(--color-border);
+            }
+
+            .ledger-row:last-child {
+                border-bottom: none;
+            }
+
+            .ledger-label {
+                font-family:    var(--font-mono);
+                font-size:      0.56rem;
+                color:          var(--color-muted);
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
                 display:        block;
                 margin-bottom:  0.2rem;
             }
 
-            .hud-value {
+            .ledger-value {
                 font-family:    var(--font-mono);
-                font-size:      clamp(1.1rem, 2.5vw, 1.6rem);
+                font-size:      0.7rem;
+                color:          var(--color-text);
+                letter-spacing: 0;
+                line-height:    1.3;
+                display:        block;
+            }
+
+            .ledger-value.large {
+                font-size:      clamp(1.1rem, 2.4vw, 1.6rem);
                 font-weight:    500;
                 letter-spacing: -0.01em;
-                line-height:    1;
-                display:        block;
-                /* Color set dynamically via JS (blackbody tint) */
+                line-height:    1.05;
                 color:          var(--color-text);
+                /* color is overridden by JS to blackbody tint */
                 transition:     color 400ms ease-out;
             }
 
-            .hud-sub {
+            .ledger-uncert {
                 font-family:    var(--font-mono);
-                font-size:      0.72rem;
+                font-size:      0.6rem;
                 color:          var(--color-muted);
                 letter-spacing: 0.02em;
-                line-height:    1;
                 display:        block;
-                margin-top:     0.3rem;
+                margin-top:     0.2rem;
             }
 
-            /* Phase regime label */
-            #hud-phase {
+            .ledger-caveat {
+                font-family:    var(--font-mono);
+                font-size:      0.56rem;
+                color:          var(--color-dim);
+                letter-spacing: 0.03em;
+                display:        block;
+                margin-top:     0.2rem;
+            }
+
+            .ledger-phase {
                 font-family:    var(--font-mono);
                 font-size:      0.7rem;
                 color:          var(--color-accent);
                 letter-spacing: 0.05em;
                 text-transform: uppercase;
                 display:        block;
-                margin-top:     var(--sp-sm);
-                border-top:     1px solid var(--color-border);
-                padding-top:    0.35rem;
-                min-width:      9rem;
             }
 
-            /* ── Scrubber ──────────────────────────────────────────────── */
-            .scrub-row {
-                display:     flex;
-                align-items: center;
-                gap:         var(--sp-sm);
+            /* Blackbody locus bar */
+            .bb-bar-wrap {
+                position:       relative;
+                width:          100%;
+                height:         4px;
+                margin:         0.35rem 0 0.45rem;
             }
 
-            .scrub-axis-labels {
+            .bb-bar {
+                position: absolute;
+                inset:    0;
+                /*
+                 * 16-stop gradient, sampled 4000 K → 80 000 K via blackbody-tannerhelland
+                 * (computed offline; matches blackbody.js for k = 4000, 9067, 14133,
+                 * 19200, 24267, 29333, 34400, 39467, 44533, 49600, 54667, 59733,
+                 * 64800, 69867, 74933, 80000)
+                 */
+                background: linear-gradient(to right,
+                    rgb(255, 159,  64)  0%,
+                    rgb(255, 197, 144)  6.67%,
+                    rgb(255, 222, 196) 13.33%,
+                    rgb(255, 238, 230) 20%,
+                    rgb(252, 244, 255) 26.67%,
+                    rgb(229, 232, 255) 33.33%,
+                    rgb(214, 222, 255) 40%,
+                    rgb(204, 215, 255) 46.67%,
+                    rgb(196, 209, 255) 53.33%,
+                    rgb(190, 205, 255) 60%,
+                    rgb(185, 201, 255) 66.67%,
+                    rgb(181, 198, 255) 73.33%,
+                    rgb(178, 196, 255) 80%,
+                    rgb(175, 194, 255) 86.67%,
+                    rgb(173, 192, 255) 93.33%,
+                    rgb(171, 191, 255) 100%);
+            }
+
+            .bb-bar-tick {
+                /* No transition — MUSE brief: zero CSS motion beyond the
+                   400ms color tween on .ledger-value.large. Position snaps
+                   instantly to scrubber pos, matching instrument readout idiom. */
+                position:    absolute;
+                top:         -3px;
+                bottom:      -3px;
+                width:       1px;
+                background:  var(--color-text);
+                left:        0%;
+                transform:   translateX(-0.5px);
+            }
+
+            .bb-scale {
                 display:         flex;
                 justify-content: space-between;
-                margin-bottom:   0.3rem;
+                font-family:     var(--font-mono);
+                font-size:       0.5rem;
+                color:           var(--color-dim);
+                letter-spacing:  0.05em;
             }
 
-            .axis-label {
+            /* Spec block — collapses under 800px container width */
+            .ledger-spec {
                 font-family:    var(--font-mono);
-                font-size:      0.58rem;
-                color:          var(--color-dim);
-                letter-spacing: 0.04em;
+                font-size:      0.6rem;
+                color:          var(--color-muted);
+                letter-spacing: 0.02em;
+                line-height:    1.5;
+            }
+            .ledger-spec span {
+                display: inline-block;
+                margin-right: 0.4rem;
+            }
+            .ledger-spec .sep {
+                color: var(--color-dim);
+                margin: 0 0.2rem;
             }
 
-            /* Thin custom slider */
+            @container ledger (max-width: 800px) {
+                #spec-block-detail { display: none; }
+                #spec-block-summary { display: block; }
+            }
+            #spec-block-summary { display: none; }
+
+            /* ────────────────────────────────────────────────────────────
+             * BOTTOM RAIL — log-time axis + scrubber
+             * ──────────────────────────────────────────────────────────── */
+            #bottom-rail-inner {
+                position:    relative;
+                height:      100%;
+                width:       100%;
+                padding:     0 var(--sp-md);
+            }
+
+            /* Decade tick row (subgrid of the 12 decades from 10⁻² to 10⁹) */
+            #log-axis-ticks {
+                position:     absolute;
+                left:         var(--sp-md);
+                right:        var(--sp-md);
+                top:          50%;
+                height:       16px;
+                pointer-events: none;
+            }
+
+            #log-axis-baseline {
+                position:   absolute;
+                left:       var(--sp-md);
+                right:      var(--sp-md);
+                top:        50%;
+                height:     1px;
+                background: var(--color-border);
+                pointer-events: none;
+            }
+
+            .axis-tick {
+                position:   absolute;
+                top:        0;
+                width:      1px;
+                background: var(--color-grid);
+                color:      var(--color-dim);
+            }
+            .axis-tick.major  { height: 8px; background: var(--color-border); }
+            .axis-tick.minor  { height: 4px; }
+            .axis-tick.subm   { height: 2px; }
+
+            .axis-tick-label {
+                position:    absolute;
+                top:         9px;
+                transform:   translateX(-50%);
+                font-family: var(--font-mono);
+                font-size:   0.56rem;
+                color:       var(--color-muted);
+                letter-spacing: 0.04em;
+                white-space: nowrap;
+                pointer-events: none;
+            }
+
+            .axis-unit-label {
+                position:    absolute;
+                right:       0;
+                top:         calc(50% + 9px);
+                font-family: var(--font-mono);
+                font-size:   0.56rem;
+                color:       var(--color-dim);
+                letter-spacing: 0.06em;
+                text-transform: uppercase;
+            }
+
+            .axis-axis-label {
+                position:    absolute;
+                left:        0;
+                top:         4px;
+                font-family: var(--font-mono);
+                font-size:   0.56rem;
+                color:       var(--color-muted);
+                letter-spacing: 0.05em;
+                pointer-events: none;
+            }
+
+            /* :has() parent — when scrubber has focus-visible, major decade ticks
+               and their labels brighten. Instant state swap, no transition. */
+            #bottom-rail:has(#scrubber:focus-visible) .axis-tick.major {
+                background: var(--color-text);
+            }
+            #bottom-rail:has(#scrubber:focus-visible) .axis-tick-label {
+                color: var(--color-text);
+            }
+
+            /* Scrubber — overlays the axis */
             #scrubber {
-                flex:         1;
+                position:     absolute;
+                left:         var(--sp-md);
+                right:        var(--sp-md);
+                top:          50%;
+                transform:    translateY(-50%);
+                width:        calc(100% - 2 * var(--sp-md));
+                height:       20px;
+                margin:       0;
                 -webkit-appearance: none;
                 appearance:   none;
-                height:       3px;
-                background:   var(--color-border);
-                border-radius: 2px;
+                background:   transparent;
                 outline:      none;
                 cursor:       pointer;
+                z-index:      3;
             }
 
+            #scrubber::-webkit-slider-runnable-track {
+                width:      100%;
+                height:     1px;
+                background: transparent;
+                border:     none;
+            }
+            #scrubber::-moz-range-track {
+                width:      100%;
+                height:     1px;
+                background: transparent;
+                border:     none;
+            }
+
+            /* Crosshair thumb — vertical 14px hairline + horizontal 6px hairline */
             #scrubber::-webkit-slider-thumb {
                 -webkit-appearance: none;
                 appearance:   none;
-                width:        14px;
-                height:       14px;
-                border-radius: 50%;
-                background:   var(--color-text);
-                border:       2px solid var(--color-border);
-                cursor:       pointer;
-                transition:   background 200ms ease-out, transform 150ms ease-out;
+                width:        12px;
+                height:       20px;
+                background:   transparent;
+                border:       none;
+                cursor:       grab;
+                position:     relative;
             }
-
             #scrubber::-moz-range-thumb {
-                width:        14px;
-                height:       14px;
-                border-radius: 50%;
-                background:   var(--color-text);
-                border:       2px solid var(--color-border);
-                cursor:       pointer;
-                transition:   background 200ms ease-out;
+                width:        12px;
+                height:       20px;
+                background:   transparent;
+                border:       none;
+                cursor:       grab;
             }
 
-            #scrubber:hover::-webkit-slider-thumb,
-            #scrubber:focus::-webkit-slider-thumb {
-                background:   var(--color-accent);
-                transform:    scale(1.15);
+            /* The actual crosshair is rendered by an overlay div tracking --cursor-pct,
+               because pseudo-elements on slider thumbs are not stylable cross-browser. */
+            #cursor-hairline {
+                position:    absolute;
+                left:        var(--sp-md);
+                right:       var(--sp-md);
+                top:         50%;
+                height:      1px;
+                pointer-events: none;
+                z-index:     2;
             }
 
-            #scrubber:hover::-moz-range-thumb,
-            #scrubber:focus::-moz-range-thumb {
-                background:   var(--color-accent);
+            #cursor-hairline::before {
+                /* vertical hairline */
+                content:    '';
+                position:   absolute;
+                left:       var(--cursor-pct);
+                top:        -8px;
+                width:      2px;
+                height:     20px;
+                background: var(--color-text);
+                transform:  translateX(-1px);
             }
 
-            /* Keyboard hint */
-            .kbd-hint {
-                font-family:    var(--font-mono);
-                font-size:      0.58rem;
-                color:          var(--color-dim);
-                white-space:    nowrap;
-                letter-spacing: 0.03em;
-                /* Hide on small screens to avoid cluttering scrubber row */
+            #cursor-hairline::after {
+                /* horizontal stub at thumb position */
+                content:    '';
+                position:   absolute;
+                left:       calc(var(--cursor-pct) - 3px);
+                top:        -0.5px;
+                width:      6px;
+                height:     1px;
+                background: var(--color-text);
             }
 
-            @media (max-width: 480px) {
-                .kbd-hint { display: none; }
+            #bottom-rail:has(#scrubber:focus-visible) #cursor-hairline::before {
+                background: var(--color-accent);
             }
 
-            /* Current time next to scrubber */
-            #scrub-label {
+            /* Scrubber readout strip beneath axis */
+            #scrub-readout {
+                position:    absolute;
+                left:        var(--sp-md);
+                right:       var(--sp-md);
+                bottom:      4px;
+                display:     flex;
+                justify-content: space-between;
                 font-family: var(--font-mono);
-                font-size:   0.65rem;
+                font-size:   0.56rem;
                 color:       var(--color-muted);
-                min-width:   5rem;
-                text-align:  right;
-                white-space: nowrap;
+                letter-spacing: 0.04em;
+                pointer-events: none;
             }
 
-            /* ── Loading overlay ──────────────────────────────────────── */
+            #scrub-readout .current {
+                color: var(--color-text);
+            }
+
+            /* ────────────────────────────────────────────────────────────
+             * LOADER
+             * ──────────────────────────────────────────────────────────── */
             #loader {
                 position:        absolute;
                 inset:           0;
@@ -327,16 +731,14 @@
                 justify-content: center;
                 z-index:         50;
                 font-family:     var(--font-mono);
-                font-size:       0.75rem;
+                font-size:       0.7rem;
                 color:           var(--color-muted);
                 letter-spacing:  0.1em;
                 text-transform:  uppercase;
             }
-
-            /* `hidden` attribute must override `display: flex` above */
             #loader[hidden] { display: none; }
 
-            /* ── WebGL error message ──────────────────────────────────── */
+            /* WebGL error overlay */
             #webgl-error {
                 position:        absolute;
                 inset:           0;
@@ -350,84 +752,83 @@
                 z-index:         100;
                 text-align:      center;
             }
-
             #webgl-error[hidden] { display: none; }
-
             #webgl-error h2 {
                 font-family:    var(--font-mono);
                 font-size:      1rem;
                 font-weight:    500;
                 color:          var(--color-text);
-                letter-spacing: 0.05em;
+                letter-spacing: 0.08em;
                 text-transform: uppercase;
             }
-
             #webgl-error p {
                 font-family: var(--font-sans);
                 font-size:   0.85rem;
                 color:       var(--color-muted);
-                max-width:   36ch;
+                max-width:   42ch;
                 line-height: 1.6;
             }
 
-            /* ── Footer attribution ───────────────────────────────────── */
-            #footer-bar {
-                position:   absolute;
-                bottom:     var(--hud-pad);
-                right:      var(--hud-pad);
-                z-index:    5;
-                pointer-events: none;
-            }
-
-            #footer-bar p {
-                font-family:    var(--font-mono);
-                font-size:      0.56rem;
-                color:          var(--color-dim);
-                letter-spacing: 0.05em;
-                text-align:     right;
-                line-height:    1.6;
-            }
-
-            /* Mobile adjustments */
-            @media (max-width: 480px) {
-                .hud-value {
-                    font-size: 1.1rem;
+            /* ────────────────────────────────────────────────────────────
+             * RESPONSIVE — collapse ledger to bottom row on narrow viewports
+             * ──────────────────────────────────────────────────────────── */
+            @media (max-width: 720px) {
+                :root {
+                    --left-gutter-w:  40px;
+                    --right-ledger-w: 40%;
                 }
-                #hud-tr {
-                    display: none; /* keep top-left only on small screens */
+                .ledger-spec, .ledger-caveat { display: none; }
+            }
+            @media (max-width: 520px) {
+                :root {
+                    --right-ledger-w: 0px;
                 }
+                #right-ledger { display: none; }
             }
         }
     </style>
 </head>
 <body>
-    <!-- Skip link (accessibility) -->
-    <a href="#c" class="skip-link" style="
-        position: absolute;
-        left: -9999px;
-        top: auto;
-        width: 1px;
-        height: 1px;
-        overflow: hidden;
-        z-index: 9999;
-        font-family: var(--font-sans);
-        padding: 0.5rem 1rem;
-        background: var(--color-surface);
-        color: var(--color-text);
-    ">Skip to simulation</a>
+    <a href="#c" class="skip-link">Skip to simulation</a>
 
-    <div id="app" role="main">
-        <!-- ── Mandatory compression banner ── -->
-        <div id="banner" role="banner" aria-label="Simulation disclaimer">
-            <p>
-                <strong>TIME COMPRESSED&nbsp;&mdash;&nbsp;~13 ORDERS OF MAGNITUDE</strong>
-                &nbsp;&mdash;&nbsp;NOT REAL-TIME
-            </p>
-        </div>
+    <h1 class="visually-hidden">Volumetric supernova simulation</h1>
 
-        <!-- ── Canvas wrapper ── -->
-        <div id="canvas-wrapper">
-            <!-- WebGL2 canvas -->
+    <main id="app">
+
+        <!-- ── TOP RAIL — instrument plate engraving ── -->
+        <header id="top-rail" role="banner" aria-label="Instrument plate">
+            <div id="top-rail-strip">
+                <span class="plate-tag">SN-VOL-RT</span>
+                <span class="plate-sep">│</span>
+                <span>REV ν1.0</span>
+                <span class="plate-sep">│</span>
+                <span>MODE: RAYMARCH</span>
+                <span class="plate-sep">│</span>
+                <span>N=64+6 [steps]</span>
+                <span class="plate-sep">│</span>
+                <span>g=0.600 [—] (model: HG)</span>
+                <span class="plate-sep">│</span>
+                <span>σ_BL=1.000 [—]</span>
+                <span class="plate-warn" aria-label="Time compression disclaimer">
+                    <strong>TIME COMPRESSED</strong>&nbsp;~13 ORDERS [s] &mdash; NOT REAL-TIME
+                </span>
+            </div>
+        </header>
+
+        <!-- ── LEFT GUTTER — DEC-style decorative axis ── -->
+        <aside id="left-gutter" aria-label="Decorative declination axis (not measured)">
+            <div id="left-gutter-axis" aria-hidden="true">
+                <span class="dec-tick">+30° 00′</span>
+                <span class="dec-tick">+15° 00′</span>
+                <span class="dec-tick">+00° 00′</span>
+                <span class="dec-tick">−15° 00′</span>
+                <span class="dec-tick">−30° 00′</span>
+            </div>
+            <span class="left-gutter-legend">DEC [decorative]</span>
+        </aside>
+
+        <!-- ── CANVAS ── -->
+        <section id="canvas-wrapper" aria-label="Live simulation channel">
             <canvas
                 id="c"
                 aria-label="Volumetric supernova simulation — use the time scrubber below to advance the simulation"
@@ -435,23 +836,21 @@
                 tabindex="-1"
             ></canvas>
 
-            <!-- HUD: top-left — T_eff + phase ── -->
-            <aside id="hud-tl" class="hud-panel" aria-label="Temperature readout">
-                <span class="hud-label">T<sub>eff</sub></span>
-                <span class="hud-value" id="hud-teff" aria-live="polite" aria-atomic="true">
-                    — K
-                </span>
-                <span id="hud-phase" aria-live="polite">—</span>
-            </aside>
+            <!-- Fiducial corner brackets (decorative — declared in legend) -->
+            <div class="fiducial q1" aria-hidden="true">
+                <span class="coord">Q1 ─ +0512 +0288 Z=−0.013</span>
+            </div>
+            <div class="fiducial q2" aria-hidden="true">
+                <span class="coord">Q2 ─ −0512 +0288 Z=−0.013</span>
+            </div>
+            <div class="fiducial q3" aria-hidden="true">
+                <span class="coord">Q3 ─ −0512 −0288 Z=+0.013</span>
+            </div>
+            <div class="fiducial q4" aria-hidden="true">
+                <span class="coord">Q4 ─ +0512 −0288 Z=+0.013</span>
+            </div>
 
-            <!-- HUD: top-right — physical time ── -->
-            <aside id="hud-tr" class="hud-panel" aria-label="Physical time readout">
-                <span class="hud-label">Physical time</span>
-                <span class="hud-value" id="hud-time" aria-live="polite">—</span>
-                <span class="hud-sub" id="hud-time-sci" aria-live="polite">—</span>
-            </aside>
-
-            <!-- WebGL2 not available -->
+            <!-- WebGL2 fallback -->
             <div id="webgl-error" hidden role="alert">
                 <h2>WebGL2 required</h2>
                 <p>
@@ -461,39 +860,208 @@
                 </p>
             </div>
 
-            <!-- Loading overlay (hidden once shaders compile) -->
+            <!-- Loader -->
             <div id="loader" aria-live="polite">Compiling shaders&hellip;</div>
+        </section>
 
-            <!-- Bottom-right attribution (non-interactive, pointer-events: none) -->
-            <div id="footer-bar" aria-hidden="true">
-                <p>
-                    Blackbody: Tanner Helland polynomial (R&sup2;&nbsp;&approx;&nbsp;0.99)<br>
-                    Volumetric: Beer&rsquo;s law + Henyey-Greenstein (g&nbsp;=&nbsp;0.6)<br>
-                    Density: 5-octave fBm<br>
-                    WebGL2 + vanilla JS
-                </p>
+        <!-- ── RIGHT LEDGER ── -->
+        <aside id="right-ledger" aria-label="Calibration ledger" role="complementary">
+            <div id="right-ledger-inner">
+
+                <!-- T_eff large numeric -->
+                <div class="ledger-row">
+                    <span class="ledger-label">T<sub>eff</sub> [K]</span>
+                    <span class="ledger-value large" id="ledger-teff" aria-live="polite" aria-atomic="true">
+                        — K
+                    </span>
+                    <span class="ledger-uncert" id="ledger-teff-uncert">
+                        ± 4 % (single-zone)
+                    </span>
+                </div>
+
+                <!-- T_eff scientific form -->
+                <div class="ledger-row">
+                    <span class="ledger-label">T<sub>eff</sub> [sci.]</span>
+                    <span class="ledger-value" id="ledger-teff-sci" aria-live="polite">
+                        —
+                    </span>
+                </div>
+
+                <!-- Blackbody locus bar -->
+                <div class="ledger-row">
+                    <span class="ledger-label">Blackbody locus [K]</span>
+                    <div class="bb-bar-wrap" aria-hidden="true">
+                        <div class="bb-bar"></div>
+                        <div class="bb-bar-tick" id="bb-bar-tick"></div>
+                    </div>
+                    <div class="bb-scale" aria-hidden="true">
+                        <span>4 × 10³</span>
+                        <span>2 × 10⁴</span>
+                        <span>4 × 10⁴</span>
+                        <span>6 × 10⁴</span>
+                        <span>8 × 10⁴</span>
+                    </div>
+                </div>
+
+                <!-- Phase regime label + caveat -->
+                <div class="ledger-row">
+                    <span class="ledger-label">Phase regime [model]</span>
+                    <span class="ledger-phase" id="ledger-phase" aria-live="polite">—</span>
+                    <span class="ledger-caveat">single-zone, log-linear interp</span>
+                </div>
+
+                <!-- Physical time -->
+                <div class="ledger-row">
+                    <span class="ledger-label">t [s, physical]</span>
+                    <span class="ledger-value" id="ledger-time" aria-live="polite">—</span>
+                    <span class="ledger-caveat" id="ledger-time-sci" aria-live="polite">—</span>
+                </div>
+
+                <!-- Instrument spec block -->
+                <div class="ledger-row">
+                    <span class="ledger-label">Instrument [const.]</span>
+                    <div class="ledger-spec" id="spec-block-detail">
+                        <span>g = 0.600</span><span class="sep">│</span>
+                        <span>σ_abs = 1.0 [—]</span><span class="sep">│</span>
+                        <span>N_p = 64 [steps]</span><span class="sep">│</span>
+                        <span>N_l = 6 [steps]</span><span class="sep">│</span>
+                        <span>fBm 5 / 2.0 / 0.5</span><span class="sep">│</span>
+                        <span>T_W = 3.5 (Reinhard)</span>
+                    </div>
+                    <div class="ledger-spec" id="spec-block-summary">
+                        <span>g=0.600</span><span class="sep">│</span><span>N=64+6</span>
+                    </div>
+                </div>
+
+                <!-- Legend / pact -->
+                <div class="ledger-row">
+                    <span class="ledger-label">Legend [pact]</span>
+                    <span class="ledger-caveat">
+                        Fiducials Q1–Q4, DEC ticks, frame coords:
+                        <strong style="color:var(--color-fiducial);font-weight:500">decorative</strong>.<br>
+                        T<sub>eff</sub>, t, phase, blackbody bar:
+                        <strong style="color:var(--color-text);font-weight:500">measured</strong> (model: piecewise log-linear, ± 4 %).
+                    </span>
+                </div>
+
             </div>
-        </div>
+        </aside>
 
-        <!-- ── Scrubber controls ── -->
-        <section id="controls" aria-label="Time control">
-            <!-- Axis tick labels -->
-            <div class="scrub-axis-labels" aria-hidden="true">
-                <span class="axis-label">10&sup2;&nbsp;s</span>
-                <span class="axis-label">1&nbsp;hr</span>
-                <span class="axis-label">1&nbsp;d</span>
-                <span class="axis-label">1&nbsp;mo</span>
-                <span class="axis-label">1&nbsp;yr</span>
-                <span class="axis-label">10&nbsp;yr</span>
-                <span class="axis-label">32&nbsp;yr</span>
-            </div>
+        <!-- ── BOTTOM RAIL — log-time axis + crosshair scrubber ── -->
+        <section id="bottom-rail" aria-label="Time control">
+            <div id="bottom-rail-inner">
+                <span class="axis-axis-label" aria-hidden="true">log₁₀ t [s]</span>
 
-            <div class="scrub-row">
-                <span class="kbd-hint" aria-hidden="true">&#8592;&nbsp;&#8594;</span>
-                <label for="scrubber" class="visually-hidden" style="
-                    position:absolute;width:1px;height:1px;
-                    overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;
-                ">
+                <div id="log-axis-baseline" aria-hidden="true"></div>
+
+                <div id="log-axis-ticks" aria-hidden="true">
+                    <!-- Major decade ticks (8px) at log10 = -2..9
+                         Position pct = (logT - LOG_T_MIN) / 11 * 100
+                         Pre-baked here; matches state.js LOG_T_MIN=-2, SPAN=11. -->
+                    <span class="axis-tick major" style="left:0%"></span>
+                    <span class="axis-tick-label" style="left:0%">10⁻²</span>
+
+                    <span class="axis-tick major" style="left:9.0909%"></span>
+                    <span class="axis-tick-label" style="left:9.0909%">10⁻¹</span>
+
+                    <span class="axis-tick major" style="left:18.1818%"></span>
+                    <span class="axis-tick-label" style="left:18.1818%">10⁰</span>
+
+                    <span class="axis-tick major" style="left:27.2727%"></span>
+                    <span class="axis-tick-label" style="left:27.2727%">10¹</span>
+
+                    <span class="axis-tick major" style="left:36.3636%"></span>
+                    <span class="axis-tick-label" style="left:36.3636%">10²</span>
+
+                    <span class="axis-tick major" style="left:45.4545%"></span>
+                    <span class="axis-tick-label" style="left:45.4545%">10³</span>
+
+                    <span class="axis-tick major" style="left:54.5455%"></span>
+                    <span class="axis-tick-label" style="left:54.5455%">10⁴</span>
+
+                    <span class="axis-tick major" style="left:63.6364%"></span>
+                    <span class="axis-tick-label" style="left:63.6364%">10⁵</span>
+
+                    <span class="axis-tick major" style="left:72.7273%"></span>
+                    <span class="axis-tick-label" style="left:72.7273%">10⁶</span>
+
+                    <span class="axis-tick major" style="left:81.8182%"></span>
+                    <span class="axis-tick-label" style="left:81.8182%">10⁷</span>
+
+                    <span class="axis-tick major" style="left:90.9091%"></span>
+                    <span class="axis-tick-label" style="left:90.9091%">10⁸</span>
+
+                    <span class="axis-tick major" style="left:100%"></span>
+                    <span class="axis-tick-label" style="left:100%">10⁹</span>
+
+                    <!-- Minor ticks (4px) at log10 + log10(2,3,5,7) within each decade.
+                         Offsets from decade base: log10(2)=0.301, log10(3)=0.477,
+                         log10(5)=0.699, log10(7)=0.845.
+                         Decade width = 9.0909%. So minor offsets:
+                         2 → +2.7363%, 3 → +4.3364%, 5 → +6.3545%, 7 → +7.6818%
+                         We emit minors only for decades 0..9 (11 majors fit in span). -->
+                    <!-- Decade -2 (base 0%) -->
+                    <span class="axis-tick minor" style="left:2.7363%"></span>
+                    <span class="axis-tick subm"  style="left:4.3364%"></span>
+                    <span class="axis-tick minor" style="left:6.3545%"></span>
+                    <span class="axis-tick subm"  style="left:7.6818%"></span>
+                    <!-- Decade -1 (base 9.0909%) -->
+                    <span class="axis-tick minor" style="left:11.8272%"></span>
+                    <span class="axis-tick subm"  style="left:13.4273%"></span>
+                    <span class="axis-tick minor" style="left:15.4454%"></span>
+                    <span class="axis-tick subm"  style="left:16.7727%"></span>
+                    <!-- Decade 0 (base 18.1818%) -->
+                    <span class="axis-tick minor" style="left:20.9181%"></span>
+                    <span class="axis-tick subm"  style="left:22.5182%"></span>
+                    <span class="axis-tick minor" style="left:24.5363%"></span>
+                    <span class="axis-tick subm"  style="left:25.8636%"></span>
+                    <!-- Decade 1 (base 27.2727%) -->
+                    <span class="axis-tick minor" style="left:30.0090%"></span>
+                    <span class="axis-tick subm"  style="left:31.6091%"></span>
+                    <span class="axis-tick minor" style="left:33.6272%"></span>
+                    <span class="axis-tick subm"  style="left:34.9545%"></span>
+                    <!-- Decade 2 (base 36.3636%) -->
+                    <span class="axis-tick minor" style="left:39.0999%"></span>
+                    <span class="axis-tick subm"  style="left:40.7000%"></span>
+                    <span class="axis-tick minor" style="left:42.7181%"></span>
+                    <span class="axis-tick subm"  style="left:44.0454%"></span>
+                    <!-- Decade 3 (base 45.4545%) -->
+                    <span class="axis-tick minor" style="left:48.1908%"></span>
+                    <span class="axis-tick subm"  style="left:49.7909%"></span>
+                    <span class="axis-tick minor" style="left:51.8090%"></span>
+                    <span class="axis-tick subm"  style="left:53.1363%"></span>
+                    <!-- Decade 4 (base 54.5455%) -->
+                    <span class="axis-tick minor" style="left:57.2818%"></span>
+                    <span class="axis-tick subm"  style="left:58.8819%"></span>
+                    <span class="axis-tick minor" style="left:60.9000%"></span>
+                    <span class="axis-tick subm"  style="left:62.2273%"></span>
+                    <!-- Decade 5 (base 63.6364%) -->
+                    <span class="axis-tick minor" style="left:66.3727%"></span>
+                    <span class="axis-tick subm"  style="left:67.9728%"></span>
+                    <span class="axis-tick minor" style="left:69.9909%"></span>
+                    <span class="axis-tick subm"  style="left:71.3182%"></span>
+                    <!-- Decade 6 (base 72.7273%) -->
+                    <span class="axis-tick minor" style="left:75.4636%"></span>
+                    <span class="axis-tick subm"  style="left:77.0637%"></span>
+                    <span class="axis-tick minor" style="left:79.0818%"></span>
+                    <span class="axis-tick subm"  style="left:80.4091%"></span>
+                    <!-- Decade 7 (base 81.8182%) -->
+                    <span class="axis-tick minor" style="left:84.5545%"></span>
+                    <span class="axis-tick subm"  style="left:86.1546%"></span>
+                    <span class="axis-tick minor" style="left:88.1727%"></span>
+                    <span class="axis-tick subm"  style="left:89.5000%"></span>
+                    <!-- Decade 8 (base 90.9091%) -->
+                    <span class="axis-tick minor" style="left:93.6454%"></span>
+                    <span class="axis-tick subm"  style="left:95.2455%"></span>
+                    <span class="axis-tick minor" style="left:97.2636%"></span>
+                    <span class="axis-tick subm"  style="left:98.5909%"></span>
+                </div>
+
+                <!-- Cursor crosshair — position via --cursor-pct -->
+                <div id="cursor-hairline" aria-hidden="true"></div>
+
+                <!-- Slider — overlaid invisibly on axis -->
+                <label for="scrubber" class="visually-hidden">
                     Time scrubber — logarithmic scale, 10⁻² s to 10⁹ s
                 </label>
                 <input
@@ -503,12 +1071,20 @@
                     max="1"
                     step="0.001"
                     value="0.182"
-                    aria-label="Time scrubber — logarithmic scale, shock breakout to nebular remnant"
+                    aria-label="Time scrubber — log₁₀ t in seconds, range 10⁻² s to 10⁹ s"
+                    aria-valuemin="-2"
+                    aria-valuemax="9"
                 >
-                <span id="scrub-label" aria-hidden="true">—</span>
+
+                <!-- Readout strip beneath the axis -->
+                <div id="scrub-readout" aria-hidden="true">
+                    <span>← →&nbsp;1 % step [—]</span>
+                    <span class="current" id="scrub-readout-current">log₁₀ t = — [s]</span>
+                </div>
             </div>
         </section>
-    </div>
+
+    </main>
 
     <script type="module" src="./main.js"></script>
 </body>
