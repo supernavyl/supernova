@@ -1,0 +1,27 @@
+{
+  "name": "supernova",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Physically-grounded volumetric WebGL2 simulation of a core-collapse supernova. No framework, no bundler.",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "dev": "python3 -m http.server 8000",
+    "test": "node test/blackbody-fidelity.js && node test/anti-cliche.js",
+    "test:blackbody": "node test/blackbody-fidelity.js",
+    "test:anticliche": "node test/anti-cliche.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "supernova",
+    "webgl2",
+    "volumetric",
+    "raymarching",
+    "blackbody",
+    "astrophysics",
+    "simulation"
+  ],
+  "license": "MIT"
+}

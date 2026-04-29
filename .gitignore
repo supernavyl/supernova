@@ -1,0 +1,15 @@
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+node_modules/
+dist/
+.cache/
+.parcel-cache/
+.env
+.env.local
+.claude-vault/

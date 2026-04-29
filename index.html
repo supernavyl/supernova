@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Supernova — Volumetric Simulation</title>
+    <meta name="description" content="Physically-grounded WebGL2 volumetric supernova simulation. Beer's law extinction, Henyey-Greenstein scattering, Tanner Helland blackbody color.">
+
+    <!-- JetBrains Mono for monospace readouts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+    <style>
+        /* ── CSS layers: reset → tokens → base → layout → components ── */
+        @layer reset, tokens, base, layout, components;
+
+        @layer reset {
+            *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+            html, body { height: 100%; }
+            button, input { font: inherit; }
+        }
+
+        @layer tokens {
+            :root {
+                /* Palette — all OKLCH */
+                --color-bg:         oklch(0.06 0.005 240);
+                --color-surface:    oklch(0.10 0.007 240);
+                --color-border:     oklch(0.20 0.008 240);
+                --color-text:       oklch(0.96 0.005 250);
+                --color-muted:      oklch(0.62 0.012 245);
+                --color-accent:     oklch(0.75 0.04 200);  /* cold blue-teal — institutional */
+                --color-dim:        oklch(0.30 0.008 240);
+
+                /* Typography */
+                --font-mono: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', ui-monospace, monospace;
+                --font-sans: system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif;
+
+                /* Spacing */
+                --sp-xs:  0.25rem;
+                --sp-sm:  0.5rem;
+                --sp-md:  1rem;
+                --sp-lg:  1.5rem;
+                --sp-xl:  2rem;
+
+                /* HUD geometry */
+                --hud-pad: clamp(0.75rem, 2vw, 1.25rem);
+                --hud-gap: 0.5rem;
+            }
+        }
+
+        @layer base {
+            /* Reduced motion FIRST */
+            @media (prefers-reduced-motion: reduce) {
+                *, *::before, *::after {
+                    animation-duration:       0.01ms !important;
+                    animation-iteration-count: 1     !important;
+                    transition-duration:      0.01ms !important;
+                    scroll-behavior:          auto   !important;
+                }
+            }
+
+            html {
+                background: var(--color-bg);
+                color:       var(--color-text);
+                font-family: var(--font-sans);
+                font-size:   clamp(12px, 1vw + 8px, 15px);
+                -webkit-font-smoothing: antialiased;
+            }
+
+            body {
+                min-height: 100dvh;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+
+            /* Focus ring — visible on all interactive elements */
+            :focus-visible {
+                outline:        2px solid var(--color-accent);
+                outline-offset: 3px;
+                border-radius:  2px;
+            }
+
+            /* Hairline horizontal rule */
+            hr.hairline {
+                border: none;
+                border-top: 1px solid var(--color-border);
+                margin: 0;
+            }
+        }
+
+        @layer layout {
+            /* Full viewport stack: banner → canvas-area */
+            #app {
+                display:        flex;
+                flex-direction: column;
+                height:         100dvh;
+                position:       relative;
+            }
+
+            /* Canvas fills remaining vertical space */
+            #canvas-wrapper {
+                flex:     1 1 auto;
+                position: relative;
+                overflow: hidden;
+                min-height: 0;
+            }
+
+            #c {
+                display: block;
+                width:   100%;
+                height:  100%;
+                /* No border, no shadow — simulation is the content */
+            }
+        }
+
+        @layer components {
+            /* ── Mandatory compression disclaimer banner ───────────────── */
+            #banner {
+                background:    var(--color-surface);
+                border-bottom: 1px solid var(--color-border);
+                padding:       0.45rem var(--hud-pad);
+                display:       flex;
+                align-items:   center;
+                justify-content: center;
+                gap:           var(--sp-sm);
+                flex-shrink:   0;
+            }
+
+            #banner p {
+                font-family: var(--font-mono);
+                font-size:   0.68rem;
+                font-weight: 500;
+                letter-spacing: 0.06em;
+                color:       var(--color-muted);
+                text-align:  center;
+                text-transform: uppercase;
+            }
+
+            #banner p strong {
+                color:       var(--color-text);
+                font-weight: 500;
+            }
+
+            /* ── HUD overlays ─────────────────────────────────────────── */
+            .hud-panel {
+                position:   absolute;
+                z-index:    10;
+                /* Pointer-events: none so scrubbing through the HUD still works */
+                pointer-events: none;
+            }
+
+            /* Top-left: T_eff + phase */
+            #hud-tl {
+                top:  var(--hud-pad);
+                left: var(--hud-pad);
+            }
+
+            /* Top-right: time readouts */
+            #hud-tr {
+                top:   var(--hud-pad);
+                right: var(--hud-pad);
+                text-align: right;
+            }
+
+            /* Bottom: scrubber + time axis labels */
+            #controls {
+                position:   absolute;
+                bottom:     0;
+                left:       0;
+                right:      0;
+                z-index:    10;
+                padding:    var(--hud-pad);
+                /* Bottom panel: pointer-events enabled for slider interaction */
+                pointer-events: auto;
+                background: linear-gradient(to top,
+                    oklch(0.06 0.005 240 / 0.92) 0%,
+                    oklch(0.06 0.005 240 / 0.0)  100%);
+            }
+
+            /* ── HUD text styles ──────────────────────────────────────── */
+            .hud-label {
+                font-family:    var(--font-mono);
+                font-size:      0.64rem;
+                color:          var(--color-muted);
+                letter-spacing: 0.07em;
+                text-transform: uppercase;
+                line-height:    1;
+                display:        block;
+                margin-bottom:  0.2rem;
+            }
+
+            .hud-value {
+                font-family:    var(--font-mono);
+                font-size:      clamp(1.1rem, 2.5vw, 1.6rem);
+                font-weight:    500;
+                letter-spacing: -0.01em;
+                line-height:    1;
+                display:        block;
+                /* Color set dynamically via JS (blackbody tint) */
+                color:          var(--color-text);
+                transition:     color 400ms ease-out;
+            }
+
+            .hud-sub {
+                font-family:    var(--font-mono);
+                font-size:      0.72rem;
+                color:          var(--color-muted);
+                letter-spacing: 0.02em;
+                line-height:    1;
+                display:        block;
+                margin-top:     0.3rem;
+            }
+
+            /* Phase regime label */
+            #hud-phase {
+                font-family:    var(--font-mono);
+                font-size:      0.7rem;
+                color:          var(--color-accent);
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+                display:        block;
+                margin-top:     var(--sp-sm);
+                border-top:     1px solid var(--color-border);
+                padding-top:    0.35rem;
+                min-width:      9rem;
+            }
+
+            /* ── Scrubber ──────────────────────────────────────────────── */
+            .scrub-row {
+                display:     flex;
+                align-items: center;
+                gap:         var(--sp-sm);
+            }
+
+            .scrub-axis-labels {
+                display:         flex;
+                justify-content: space-between;
+                margin-bottom:   0.3rem;
+            }
+
+            .axis-label {
+                font-family:    var(--font-mono);
+                font-size:      0.58rem;
+                color:          var(--color-dim);
+                letter-spacing: 0.04em;
+            }
+
+            /* Thin custom slider */
+            #scrubber {
+                flex:         1;
+                -webkit-appearance: none;
+                appearance:   none;
+                height:       3px;
+                background:   var(--color-border);
+                border-radius: 2px;
+                outline:      none;
+                cursor:       pointer;
+            }
+
+            #scrubber::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                appearance:   none;
+                width:        14px;
+                height:       14px;
+                border-radius: 50%;
+                background:   var(--color-text);
+                border:       2px solid var(--color-border);
+                cursor:       pointer;
+                transition:   background 200ms ease-out, transform 150ms ease-out;
+            }
+
+            #scrubber::-moz-range-thumb {
+                width:        14px;
+                height:       14px;
+                border-radius: 50%;
+                background:   var(--color-text);
+                border:       2px solid var(--color-border);
+                cursor:       pointer;
+                transition:   background 200ms ease-out;
+            }
+
+            #scrubber:hover::-webkit-slider-thumb,
+            #scrubber:focus::-webkit-slider-thumb {
+                background:   var(--color-accent);
+                transform:    scale(1.15);
+            }
+
+            #scrubber:hover::-moz-range-thumb,
+            #scrubber:focus::-moz-range-thumb {
+                background:   var(--color-accent);
+            }
+
+            /* Keyboard hint */
+            .kbd-hint {
+                font-family:    var(--font-mono);
+                font-size:      0.58rem;
+                color:          var(--color-dim);
+                white-space:    nowrap;
+                letter-spacing: 0.03em;
+                /* Hide on small screens to avoid cluttering scrubber row */
+            }
+
+            @media (max-width: 480px) {
+                .kbd-hint { display: none; }
+            }
+
+            /* Current time next to scrubber */
+            #scrub-label {
+                font-family: var(--font-mono);
+                font-size:   0.65rem;
+                color:       var(--color-muted);
+                min-width:   5rem;
+                text-align:  right;
+                white-space: nowrap;
+            }
+
+            /* ── Loading overlay ──────────────────────────────────────── */
+            #loader {
+                position:        absolute;
+                inset:           0;
+                background:      var(--color-bg);
+                display:         flex;
+                align-items:     center;
+                justify-content: center;
+                z-index:         50;
+                font-family:     var(--font-mono);
+                font-size:       0.75rem;
+                color:           var(--color-muted);
+                letter-spacing:  0.1em;
+                text-transform:  uppercase;
+            }
+
+            /* ── WebGL error message ──────────────────────────────────── */
+            #webgl-error {
+                position:        absolute;
+                inset:           0;
+                background:      var(--color-bg);
+                display:         flex;
+                flex-direction:  column;
+                align-items:     center;
+                justify-content: center;
+                gap:             var(--sp-md);
+                padding:         var(--sp-xl);
+                z-index:         100;
+                text-align:      center;
+            }
+
+            #webgl-error[hidden] { display: none; }
+
+            #webgl-error h2 {
+                font-family:    var(--font-mono);
+                font-size:      1rem;
+                font-weight:    500;
+                color:          var(--color-text);
+                letter-spacing: 0.05em;
+                text-transform: uppercase;
+            }
+
+            #webgl-error p {
+                font-family: var(--font-sans);
+                font-size:   0.85rem;
+                color:       var(--color-muted);
+                max-width:   36ch;
+                line-height: 1.6;
+            }
+
+            /* ── Footer attribution ───────────────────────────────────── */
+            #footer-bar {
+                position:   absolute;
+                bottom:     var(--hud-pad);
+                right:      var(--hud-pad);
+                z-index:    5;
+                pointer-events: none;
+            }
+
+            #footer-bar p {
+                font-family:    var(--font-mono);
+                font-size:      0.56rem;
+                color:          var(--color-dim);
+                letter-spacing: 0.05em;
+                text-align:     right;
+                line-height:    1.6;
+            }
+
+            /* Mobile adjustments */
+            @media (max-width: 480px) {
+                .hud-value {
+                    font-size: 1.1rem;
+                }
+                #hud-tr {
+                    display: none; /* keep top-left only on small screens */
+                }
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Skip link (accessibility) -->
+    <a href="#c" class="skip-link" style="
+        position: absolute;
+        left: -9999px;
+        top: auto;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        z-index: 9999;
+        font-family: var(--font-sans);
+        padding: 0.5rem 1rem;
+        background: var(--color-surface);
+        color: var(--color-text);
+    ">Skip to simulation</a>
+
+    <div id="app" role="main">
+        <!-- ── Mandatory compression banner ── -->
+        <div id="banner" role="banner" aria-label="Simulation disclaimer">
+            <p>
+                <strong>TIME COMPRESSED&nbsp;&mdash;&nbsp;~13 ORDERS OF MAGNITUDE</strong>
+                &nbsp;&mdash;&nbsp;NOT REAL-TIME
+            </p>
+        </div>
+
+        <!-- ── Canvas wrapper ── -->
+        <div id="canvas-wrapper">
+            <!-- WebGL2 canvas -->
+            <canvas
+                id="c"
+                aria-label="Volumetric supernova simulation — use the time scrubber below to advance the simulation"
+                role="img"
+                tabindex="-1"
+            ></canvas>
+
+            <!-- HUD: top-left — T_eff + phase ── -->
+            <aside id="hud-tl" class="hud-panel" aria-label="Temperature readout">
+                <span class="hud-label">T<sub>eff</sub></span>
+                <span class="hud-value" id="hud-teff" aria-live="polite" aria-atomic="true">
+                    — K
+                </span>
+                <span id="hud-phase" aria-live="polite">—</span>
+            </aside>
+
+            <!-- HUD: top-right — physical time ── -->
+            <aside id="hud-tr" class="hud-panel" aria-label="Physical time readout">
+                <span class="hud-label">Physical time</span>
+                <span class="hud-value" id="hud-time" aria-live="polite">—</span>
+                <span class="hud-sub" id="hud-time-sci" aria-live="polite">—</span>
+            </aside>
+
+            <!-- WebGL2 not available -->
+            <div id="webgl-error" hidden role="alert">
+                <h2>WebGL2 required</h2>
+                <p>
+                    This simulation requires WebGL2, supported in all modern browsers
+                    (Chrome 56+, Firefox 51+, Safari 15+, Edge 79+). Please update
+                    your browser or try a different device.
+                </p>
+            </div>
+
+            <!-- Loading overlay (hidden once shaders compile) -->
+            <div id="loader" aria-live="polite">Compiling shaders&hellip;</div>
+
+            <!-- Bottom-right attribution (non-interactive, pointer-events: none) -->
+            <div id="footer-bar" aria-hidden="true">
+                <p>
+                    Blackbody: Tanner Helland polynomial (R&sup2;&nbsp;&approx;&nbsp;0.99)<br>
+                    Volumetric: Beer&rsquo;s law + Henyey-Greenstein (g&nbsp;=&nbsp;0.6)<br>
+                    Density: 5-octave fBm<br>
+                    WebGL2 + vanilla JS
+                </p>
+            </div>
+        </div>
+
+        <!-- ── Scrubber controls ── -->
+        <section id="controls" aria-label="Time control">
+            <!-- Axis tick labels -->
+            <div class="scrub-axis-labels" aria-hidden="true">
+                <span class="axis-label">10&sup2;&nbsp;s</span>
+                <span class="axis-label">1&nbsp;hr</span>
+                <span class="axis-label">1&nbsp;d</span>
+                <span class="axis-label">1&nbsp;mo</span>
+                <span class="axis-label">1&nbsp;yr</span>
+                <span class="axis-label">10&nbsp;yr</span>
+                <span class="axis-label">32&nbsp;yr</span>
+            </div>
+
+            <div class="scrub-row">
+                <span class="kbd-hint" aria-hidden="true">&#8592;&nbsp;&#8594;</span>
+                <label for="scrubber" class="visually-hidden" style="
+                    position:absolute;width:1px;height:1px;
+                    overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;
+                ">
+                    Time scrubber — logarithmic scale, 10⁻² s to 10⁹ s
+                </label>
+                <input
+                    type="range"
+                    id="scrubber"
+                    min="0"
+                    max="1"
+                    step="0.001"
+                    value="0.182"
+                    aria-label="Time scrubber — logarithmic scale, shock breakout to nebular remnant"
+                >
+                <span id="scrub-label" aria-hidden="true">—</span>
+            </div>
+        </section>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+</body>
+</html>
