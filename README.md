@@ -109,24 +109,59 @@ luminosity computation.
 
 ## Architecture
 
+The shipped renderer is a **3D GPU particle system** (`MODE: GPU-PCL-3D`,
+N = 120k). The ejecta is represented as 120 000 GPU-resident point sprites
+rather than a fullscreen volumetric raymarcher.
+
 ```
-index.html          — canvas, HUD DOM, CSS (OKLCH palette, JetBrains Mono)
-main.js             — WebGL2 context, render loop, scrubber wiring
-state.js            — time→T_eff, time→radius, phase labels, formatters
-blackbody.js        — Tanner Helland polynomial (JS side — used for HUD colour tint)
+index.html             — canvas, HUD DOM, CSS (OKLCH palette, JetBrains Mono)
+main.js                — WebGL2 context, render loop, 3-pass pipeline, scrubber wiring
+particles.js           — particle system + orbit camera + starfield (inlined mat4/vec3)
+state.js               — time→T_eff, time→radius, phase labels, formatters
+blackbody.js           — Tanner Helland polynomial (JS side — used for HUD colour tint)
 shaders/
-  fullscreen.vert.glsl  — canonical reference (read by editors / glslangValidator)
-  fullscreen.vert.js    — same source, ESM-exported string (loaded by main.js)
-  raymarch.frag.glsl    — canonical reference
-  raymarch.frag.js      — same source, ESM-exported string (loaded by main.js)
+  particles.vert.js    — per-particle world position + blackbody colour (ESM string)
+  particles.frag.js    — soft Gaussian point sprite, additive output
+  starfield.vert.js    — background starfield vertex shader
+  starfield.frag.js    — background starfield fragment shader
+  tonemap.frag.js       — Reinhard HDR → sRGB tonemap (fullscreen-triangle pass)
 ```
+
+### Particle system
+
+Each particle carries three **static** attributes uploaded once at init and
+never re-uploaded: its initial unit-shell position (`a_pos0`), outward unit
+direction (`a_dir`), and a per-particle seed (`a_seed`). There is no CPU
+update loop and no `bufferData` per frame — every frame the vertex shader
+computes the current world-space position from `a_pos0` plus the per-frame
+uniforms: `u_radius` (the Sedov-Taylor shell scale from `state.js`) and a
+small fBm-driven Rayleigh-Taylor displacement. The blackbody colour is
+evaluated per particle in the vertex shader from the current `u_teff`.
+
+### Render passes
+
+1. **HDR scene → float FBO.** A half-float (`RGBA16F`) framebuffer is bound so
+   brightness can exceed 1.0 without saturating to white. The starfield is drawn
+   opaque, then the particles are drawn additively (`blendFunc(ONE, ONE)`) as
+   soft Gaussian point sprites that accumulate into the HDR target.
+2. **Tonemap → default framebuffer.** A fullscreen-triangle pass samples the HDR
+   texture and applies Reinhard luminance tonemapping (white-point 6.0) to
+   compress the accumulated emission into displayable sRGB.
+
+### Inlined shaders
 
 Shader sources are inlined as ESM string exports rather than fetched from
 disk. The await between `getContext('webgl2')` and `compileShader` is when
 Brave/Chromium can preempt the freshly-created context with a spurious
 `CONTEXT_LOST_WEBGL`, killing the first compile. Inlining removes the gap.
-The `.glsl` files remain the canonical reference for editor tooling and
-`glslangValidator` — **edit both when changing a shader**.
+
+## Live demo
+
+This is a static, no-build site — any static file server works. The quickest
+path is `npm run dev`, then open <http://localhost:8000/>.
+
+<!-- live demo: deploy via GitHub Pages -->
+**TODO:** hosted demo link (GitHub Pages) — not yet deployed.
 
 ## Running
 
@@ -157,15 +192,15 @@ node test/anti-cliche.js           # first-paint must read blue-white
 
 ## Performance targets
 
-- 64 primary steps + 6 light steps on desktop (Intel Iris Xe / M1 class)
-- 32 primary steps on mobile (detected by UA + viewport width)
-- Adaptive step termination: early-out when transmittance < 0.5% (fully opaque)
+- 120k particles on desktop (Intel Iris Xe / M1 class)
+- Particle count capped to ~40k on mobile for fill-rate (detected by UA + viewport width)
+- Device-pixel-ratio capped at 2.0 (1.5 on mobile) to bound backing-buffer cost
+- Static per-particle attributes: uploaded once, zero per-frame `bufferData`
 
 ## What is NOT implemented (by design)
 
 - Spectroscopy panel (PHANTOM)
 - "Sedov-Taylor" user-visible label (internal math only)
-- GPGPU particles
 - Post-processing (bloom, chromatic aberration, glow)
 - Audio
 - Three.js or any framework
