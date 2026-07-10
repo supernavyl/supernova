@@ -1,5 +1,7 @@
 # Supernova — Volumetric WebGL2 Simulation
 
+**[▶ Live demo](https://supernavyl.github.io/supernova/)**
+
 A physically-grounded volumetric rendering of a core-collapse supernova, showing
 13 orders of magnitude of time compressed into an interactive scrubber.
 
